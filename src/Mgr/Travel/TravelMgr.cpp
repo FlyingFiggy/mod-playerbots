@@ -25,6 +25,8 @@
 #include "VMapMgr2.h"
 #include <iomanip>
 #include <numeric>
+#include <unordered_map>
+#include <unordered_set>
 
 // Navigation data
 
@@ -1572,6 +1574,12 @@ void TravelTarget::setStatus(TravelStatus status)
 
 bool TravelTarget::isActive()
 {
+    if (wPosition && !sPlayerbotAIConfig.IsMapAllowedByExpansion(wPosition->GetMapId()))
+    {
+        setStatus(TRAVEL_STATUS_EXPIRED);
+        return false;
+    }
+
     if (m_status == TRAVEL_STATUS_NONE || m_status == TRAVEL_STATUS_EXPIRED || m_status == TRAVEL_STATUS_PREPARE)
         return false;
 
@@ -1606,6 +1614,12 @@ uint32 TravelTarget::getMaxTravelTime() { return (1000.0 * distance(bot)) / bot-
 
 bool TravelTarget::isTraveling()
 {
+    if (wPosition && !sPlayerbotAIConfig.IsMapAllowedByExpansion(wPosition->GetMapId()))
+    {
+        setStatus(TRAVEL_STATUS_EXPIRED);
+        return false;
+    }
+
     if (m_status != TRAVEL_STATUS_TRAVEL)
         return false;
 
@@ -4643,9 +4657,36 @@ void TravelMgr::PrepareDestinationCache()
     uint32 bankerCount = 0;
 
     LOG_INFO("playerbots", "Preparing destination caches for {} levels...", maxLevel);
-    // Temporary map to group creatures by entry and area
-    std::map<std::tuple<uint16, int32, int32, int32>, std::vector<CreatureData>> tempLocsCache;
-    std::map<uint32, std::map<uint32, std::vector<WorldLocation>>> tempCreatureCache;
+
+    // Keep only the data that is actually consumed after the scan. The old
+    // implementation copied every CreatureData/WorldLocation into temporary
+    // vectors, although the final pass only needs a count, one entry/map id,
+    // and coordinate sums.
+    struct TempLocationGroup
+    {
+        uint32 count = 0;
+        uint32 firstEntry = 0;
+    };
+
+    struct TempCreatureGroup
+    {
+        uint32 count = 0;
+        uint16 firstMapId = 0;
+        float totalX = 0.0f;
+        float totalY = 0.0f;
+        float totalZ = 0.0f;
+    };
+
+    std::map<std::tuple<uint16, int32, int32, int32>, TempLocationGroup> tempLocsCache;
+    std::map<uint32, std::map<uint32, TempCreatureGroup>> tempCreatureCache;
+
+    // Avoid a linear search through randomBotMaps and repeated FindMap calls
+    // for every creature spawn in the world database.
+    std::unordered_set<uint16> allowedMaps(sPlayerbotAIConfig.randomBotMaps.begin(),
+                                           sPlayerbotAIConfig.randomBotMaps.end());
+    std::unordered_map<uint16, Map*> mapCache;
+    mapCache.reserve(allowedMaps.size());
+
     for (auto const& [guid, creatureData] : sObjectMgr->GetAllCreatureData())
     {
         CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureData.id);
@@ -4653,28 +4694,14 @@ void TravelMgr::PrepareDestinationCache()
             continue;
 
         uint16 mapId = creatureData.mapid;
-        if (std::find(sPlayerbotAIConfig.randomBotMaps.begin(), sPlayerbotAIConfig.randomBotMaps.end(), mapId)
-                      == sPlayerbotAIConfig.randomBotMaps.end())
+        if (!allowedMaps.count(mapId) || !sPlayerbotAIConfig.IsMapAllowedByExpansion(mapId))
             continue;
 
-        float x = creatureData.posX;
-        float y = creatureData.posY;
-        float z = creatureData.posZ;
-        float orient = creatureData.orientation;
-        uint32 templateEntry = creatureData.id;
-
-        Map* map = sMapMgr->FindMap(mapId, 0);
-        if (!map)
-            continue;
-
-        AreaTableEntry const* area = sAreaTableStore.LookupEntry(map->GetAreaId(PHASEMASK_NORMAL, x, y, z));
-        if (!area)
-            continue;
-
-        uint32 areaId = area->zone ? area->zone : area->ID;
-
-        // CREATURES
-        if (creatureTemplate->npcflag == 0 &&
+        // Filter on cheap template/spawn fields before doing the comparatively
+        // expensive map/area lookup. These predicates are identical to the
+        // three branches below, so skipped spawns could never enter a cache.
+        bool const creatureCandidate =
+            creatureTemplate->npcflag == 0 &&
             creatureTemplate->lootid != 0 &&
             creatureTemplate->maxlevel - creatureTemplate->minlevel < 3 &&
             creatureTemplate->Entry != 32820 && creatureTemplate->Entry != 24196 &&
@@ -4685,20 +4712,76 @@ void TravelMgr::PrepareDestinationCache()
             creatureTemplate->faction != 188 && creatureTemplate->faction != 1575 &&
             (creatureTemplate->unit_flags & 256) == 0 &&
             (creatureTemplate->unit_flags & 4096) == 0 &&
-            creatureTemplate->rank == 0)
+            creatureTemplate->rank == 0;
+
+        bool const serviceCandidate =
+            (creatureTemplate->npcflag & UNIT_NPC_FLAG_FLIGHTMASTER ||
+             creatureTemplate->npcflag & UNIT_NPC_FLAG_INNKEEPER) &&
+            creatureTemplate->Entry != 3838 && creatureTemplate->Entry != 29480;
+
+        bool const bankerCandidate =
+            (creatureTemplate->npcflag & UNIT_NPC_FLAG_BANKER) &&
+            creatureTemplate->npcflag != 135298 &&
+            creatureTemplate->minlevel != 55 &&
+            creatureTemplate->minlevel != 65 &&
+            creatureTemplate->faction != 35 && creatureTemplate->faction != 474 &&
+            creatureTemplate->faction != 69 && creatureTemplate->faction != 57 &&
+            creatureTemplate->Entry != 30606 && creatureTemplate->Entry != 30608 &&
+            creatureTemplate->Entry != 29282;
+
+        if (!creatureCandidate && !serviceCandidate && !bankerCandidate)
+            continue;
+
+        float x = creatureData.posX;
+        float y = creatureData.posY;
+        float z = creatureData.posZ;
+        float orient = creatureData.orientation;
+        uint32 templateEntry = creatureData.id;
+
+        Map* map = nullptr;
+        auto mapItr = mapCache.find(mapId);
+        if (mapItr != mapCache.end())
+            map = mapItr->second;
+        else
+        {
+            map = sMapMgr->FindMap(mapId, 0);
+            if (map)
+                mapCache.emplace(mapId, map);
+        }
+
+        if (!map)
+            continue;
+
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(map->GetAreaId(PHASEMASK_NORMAL, x, y, z));
+        if (!area)
+            continue;
+
+        uint32 areaId = area->zone ? area->zone : area->ID;
+
+        // CREATURES
+        if (creatureCandidate)
         {
             int32 roundX = static_cast<int32>(std::lround(x / 50.0f));
             int32 roundY = static_cast<int32>(std::lround(y / 50.0f));
             int32 roundZ = static_cast<int32>(std::lround(z / 50.0f));
-            tempLocsCache[std::make_tuple(mapId, roundX, roundY, roundZ)].push_back(creatureData);
-            tempCreatureCache[templateEntry][areaId].push_back(WorldLocation(mapId, x, y, z));
+
+            auto& locGroup = tempLocsCache[std::make_tuple(mapId, roundX, roundY, roundZ)];
+            if (locGroup.count == 0)
+                locGroup.firstEntry = templateEntry;
+            ++locGroup.count;
+
+            auto& creatureGroup = tempCreatureCache[templateEntry][areaId];
+            if (creatureGroup.count == 0)
+                creatureGroup.firstMapId = mapId;
+            ++creatureGroup.count;
+            creatureGroup.totalX += x;
+            creatureGroup.totalY += y;
+            creatureGroup.totalZ += z;
         }
-        // FLIGHT MASTERS
+        // FLIGHT MASTERS / INNKEEPERS
         // Entry 29480 is Grimwing (Storm Peaks)
         // Entry 3838 is Vesprystus in Rut'Theran. Need Travel Node system to resolve this one.
-        else if ((creatureTemplate->npcflag & UNIT_NPC_FLAG_FLIGHTMASTER ||
-                  creatureTemplate->npcflag & UNIT_NPC_FLAG_INNKEEPER) &&
-                creatureTemplate->Entry != 3838 && creatureTemplate->Entry != 29480)
+        else if (serviceCandidate)
         {
             FactionTemplateEntry const* factionEntry = sFactionTemplateStore.LookupEntry(creatureTemplate->faction);
             bool forHorde = !(factionEntry->hostileMask & 4);
@@ -4774,14 +4857,7 @@ void TravelMgr::PrepareDestinationCache()
             }
         }
         // === BANKERS ===
-        else if (creatureTemplate->npcflag & UNIT_NPC_FLAG_BANKER &&
-                 creatureTemplate->npcflag != 135298 &&
-                 creatureTemplate->minlevel != 55 &&
-                 creatureTemplate->minlevel != 65 &&
-                 creatureTemplate->faction != 35 && creatureTemplate->faction != 474 &&
-                 creatureTemplate->faction != 69 && creatureTemplate->faction != 57 &&
-                 creatureTemplate->Entry != 30606 && creatureTemplate->Entry != 30608 &&
-                 creatureTemplate->Entry != 29282)
+        else if (bankerCandidate)
         {
             BankerLocation bLoc;
             bLoc.loc = WorldLocation(mapId, x + cos(orient) * 6.0f, y + sin(orient) * 6.0f, z + 2.0f, orient + M_PI);
@@ -4790,15 +4866,15 @@ void TravelMgr::PrepareDestinationCache()
             for (uint32 l = 1; l <= maxLevel; l++)
             {
                 // Bots 1-60 go to base game bankers (all have minlevel 30 or 45)
-                if (l <=60 && level > 45)
+                if (l <= 60 && level > 45)
                     continue;
 
                 // Bots 61-70 go to Shattrath bankers (all have minlevel 60 or 70)
-                if ((l >=61 && l <=70) && (level < 60 || level > 70))
+                if ((l >= 61 && l <= 70) && (level < 60 || level > 70))
                     continue;
 
                 // Bots 71+ go to Dalaran bankers (all have minlevel 75)
-                if ((l >=71) && level != 75)
+                if ((l >= 71) && level != 75)
                     continue;
 
                 bankerLocsPerLevelCache[(uint8)l].push_back(bLoc);
@@ -4809,11 +4885,14 @@ void TravelMgr::PrepareDestinationCache()
     }
 
     // Process temporary caches
-    for (auto const& [gridTuple, creatureDataList] : tempLocsCache)
+    for (auto const& [gridTuple, locGroup] : tempLocsCache)
     {
-        if (creatureDataList.size() >= 2)
+        if (locGroup.count >= 2)
         {
-            CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureDataList[0].id);
+            CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(locGroup.firstEntry);
+            if (!creatureTemplate)
+                continue;
+
             uint32 level = (creatureTemplate->minlevel + creatureTemplate->maxlevel + 1) / 2;
             for (int32 l = (int32)level - (int32)sPlayerbotAIConfig.randomBotTeleLowerLevel;
                  l <= (int32)level + (int32)sPlayerbotAIConfig.randomBotTeleHigherLevel; l++)
@@ -4828,26 +4907,21 @@ void TravelMgr::PrepareDestinationCache()
             }
         }
     }
+
     for (auto const& [entry, areaMap] : tempCreatureCache)
     {
-        for (auto const& [area, locList] : areaMap)
+        for (auto const& [area, creatureGroup] : areaMap)
         {
-            if (locList.size() > 3)
+            if (creatureGroup.count == 0 || creatureGroup.count > 3)
                 continue;
 
-            float totalX = 0, totalY = 0, totalZ = 0;
-            for (auto const& loc : locList)
-            {
-                totalX += loc.GetPositionX();
-                totalY += loc.GetPositionY();
-                totalZ += loc.GetPositionZ();
-            }
-            float avgX = totalX / locList.size();
-            float avgY = totalY / locList.size();
-            float avgZ = totalZ / locList.size();
-            creatureSpawnsByTemplate[entry].push_back(WorldLocation(locList[0].GetMapId(), avgX, avgY, avgZ, 0));
+            float avgX = creatureGroup.totalX / creatureGroup.count;
+            float avgY = creatureGroup.totalY / creatureGroup.count;
+            float avgZ = creatureGroup.totalZ / creatureGroup.count;
+            creatureSpawnsByTemplate[entry].push_back(WorldLocation(creatureGroup.firstMapId, avgX, avgY, avgZ, 0));
         }
     }
+
     // Add travel hubs based on player start locations
     for (uint32 i = 1; i < sRaceMgr->GetMaxRaces(); i++)
     {
@@ -4855,7 +4929,7 @@ void TravelMgr::PrepareDestinationCache()
         {
             PlayerInfo const* info = sObjectMgr->GetPlayerInfo(i, j);
 
-            if (!info)
+            if (!info || !sPlayerbotAIConfig.IsMapAllowedByExpansion(info->mapId))
                 continue;
 
             WorldPosition pos(info->mapId, info->positionX, info->positionY, info->positionZ, info->orientation);

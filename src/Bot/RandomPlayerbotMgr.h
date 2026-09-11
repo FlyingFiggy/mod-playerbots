@@ -100,6 +100,7 @@ public:
 
     void LogPlayerLocation();
     void UpdateAIInternal(uint32 elapsed, bool minimal = false) override;
+    void ValidateRandomBotPositions(uint32 maxChecksThisTick = 10);
 
     uint32 activeBots = 0;
     static bool HandlePlayerbotConsoleCommand(ChatHandler* handler, char const* args);
@@ -179,6 +180,9 @@ protected:
     void OnBotLoginInternal(Player* const bot) override;
 
 private:
+    std::vector<ObjectGuid> positionValidationGuids;
+    size_t positionValidationCursor = 0;
+
     RandomPlayerbotMgr() : PlayerbotHolder()
     {
         this->playersLevel = sPlayerbotAIConfig.randombotStartingLevel;

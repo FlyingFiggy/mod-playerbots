@@ -2500,25 +2500,31 @@ void TravelNodeMap::BuildTaxiGraph()
 
 void TravelNodeMap::ComputeAllPaths()
 {
-    std::set<uint32> allNodes;
-    for (auto const& [source, neighbors] : taxiGraph)
-    {
-        allNodes.insert(source);
-        allNodes.insert(neighbors.begin(), neighbors.end());
-    }
+    taxiPathCache.clear();
+    taxiPathCache.reserve(taxiGraph.size());
 
-    for (uint32 source : allNodes)
+    for (auto const& graphEntry : taxiGraph)
     {
+        uint32 source = graphEntry.first;
         auto parentMap = BFS(source);
+        if (parentMap.size() <= 1)
+            continue;
 
-        for (uint32 target : allNodes)
+        auto& sourceCache = taxiPathCache[source];
+        sourceCache.reserve(parentMap.size() - 1);
+
+        // parentMap contains exactly the nodes reachable from this source, so
+        // there is no need to try every node in the whole taxi graph and then
+        // discard unreachable paths.
+        for (auto const& parentEntry : parentMap)
         {
+            uint32 target = parentEntry.first;
             if (source == target)
                 continue;
 
             auto path = BuildPath(source, target, parentMap);
             if (!path.empty())
-                taxiPathCache[source][target] = path;
+                sourceCache.emplace(target, std::move(path));
         }
     }
 }
@@ -2526,11 +2532,10 @@ void TravelNodeMap::ComputeAllPaths()
 std::unordered_map<uint32, uint32> TravelNodeMap::BFS(uint32 fromNode)
 {
     std::queue<uint32> workQueue;
-    std::unordered_set<uint32> visited;
     std::unordered_map<uint32, uint32> parentMap;
+    parentMap.reserve(taxiGraph.size());
 
     workQueue.push(fromNode);
-    visited.insert(fromNode);
     parentMap[fromNode] = 0;
 
     while (!workQueue.empty())
@@ -2544,10 +2549,10 @@ std::unordered_map<uint32, uint32> TravelNodeMap::BFS(uint32 fromNode)
 
         for (uint32 next : graphItr->second)
         {
-            if (visited.count(next))
+            // parentMap also serves as the visited set.
+            if (parentMap.find(next) != parentMap.end())
                 continue;
 
-            visited.insert(next);
             parentMap[next] = current;
             workQueue.push(next);
         }

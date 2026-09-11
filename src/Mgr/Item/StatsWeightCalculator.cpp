@@ -33,6 +33,64 @@ constexpr uint32 SPELL_POLEAXE_SPECIALIZATION = 12785;
 constexpr uint32 SPELL_NERVES_OF_COLD_STEEL = 50138;
 constexpr uint32 SPELL_SHADOW_FOCUS = 15835;
 constexpr uint32 SPELL_ARCANE_FOCUS = 12840;
+
+bool IsUsableRandomPropertyEnchant(uint32 enchantId)
+{
+    if (!enchantId)
+        return true;
+
+    SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantId);
+    if (!enchant)
+        return false;
+
+    for (uint8 i = 0; i < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++i)
+    {
+        if (enchant->type[i] != ITEM_ENCHANTMENT_TYPE_COMBAT_SPELL &&
+            enchant->type[i] != ITEM_ENCHANTMENT_TYPE_EQUIP_SPELL)
+        {
+            continue;
+        }
+
+        uint32 spellId = enchant->spellid[i];
+        if (spellId && !sSpellMgr->GetSpellInfo(spellId))
+            return false;
+    }
+
+    return true;
+}
+
+bool IsUsableRandomProperty(int32 randomPropertyId)
+{
+    if (randomPropertyId > 0)
+    {
+        ItemRandomPropertiesEntry const* itemRandom = sItemRandomPropertiesStore.LookupEntry(randomPropertyId);
+        if (!itemRandom)
+            return false;
+
+        for (uint32 slot = PROP_ENCHANTMENT_SLOT_0; slot < MAX_ENCHANTMENT_SLOT; ++slot)
+        {
+            if (!IsUsableRandomPropertyEnchant(itemRandom->Enchantment[slot - PROP_ENCHANTMENT_SLOT_0]))
+                return false;
+        }
+        return true;
+    }
+
+    if (randomPropertyId < 0)
+    {
+        ItemRandomSuffixEntry const* itemRandom = sItemRandomSuffixStore.LookupEntry(-randomPropertyId);
+        if (!itemRandom)
+            return false;
+
+        for (uint32 slot = PROP_ENCHANTMENT_SLOT_0; slot < MAX_ENCHANTMENT_SLOT; ++slot)
+        {
+            if (!IsUsableRandomPropertyEnchant(itemRandom->Enchantment[slot - PROP_ENCHANTMENT_SLOT_0]))
+                return false;
+        }
+        return true;
+    }
+
+    return true;
+}
 }
 
 template <size_t Size>
@@ -234,6 +292,8 @@ int32 StatsWeightCalculator::PickBestRandomPropertyId(uint32 itemId)
     for (uint32 enchId : pool)
     {
         int32 candidate = isSuffix ? -static_cast<int32>(enchId) : static_cast<int32>(enchId);
+        if (!IsUsableRandomProperty(candidate))
+            continue;
 
         collector_->Reset();
         CalculateRandomProperty(candidate, itemId);

@@ -65,6 +65,43 @@ std::vector<uint32> PlayerbotFactory::ccBreakTrinketCache;
 
 namespace
 {
+bool IsUsablePlayerbotEnchant(SpellItemEnchantmentEntry const* enchant)
+{
+    if (!enchant)
+        return false;
+
+    for (uint8 i = 0; i < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++i)
+    {
+        if (enchant->type[i] != ITEM_ENCHANTMENT_TYPE_COMBAT_SPELL &&
+            enchant->type[i] != ITEM_ENCHANTMENT_TYPE_EQUIP_SPELL)
+        {
+            continue;
+        }
+
+        uint32 spellId = enchant->spellid[i];
+        if (spellId && !sSpellMgr->GetSpellInfo(spellId))
+            return false;
+    }
+
+    return true;
+}
+
+Item* EquipPlayerbotGeneratedItem(Player* bot, uint16 dest, uint32 itemId, int32 randomPropertyId)
+{
+    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+    if (!proto || (!proto->RandomProperty && !proto->RandomSuffix))
+        return bot->EquipNewItem(dest, itemId, true);
+
+    // EquipNewItem() lets core generate and apply a random property before the bot can replace it.
+    // Create random-property gear with the already-filtered property so obsolete equip spells are
+    // never applied transiently during initial bot gearing. clone=true prevents fallback randomization.
+    Item* item = Item::CreateItem(itemId, 1, bot, true, static_cast<uint32>(randomPropertyId));
+    if (!item)
+        return nullptr;
+
+    return bot->EquipItem(dest, item, true);
+}
+
 constexpr uint32 SPELL_DRUID_THICK_HIDE = 16931;
 constexpr uint32 SPELL_OWLKIN_FRENZY = 48393;
 constexpr uint32 SPELL_PRIMAL_TENACITY = 33957;
@@ -460,8 +497,11 @@ void PlayerbotFactory::Init()
                 continue;
 
             SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
-            if (!enchant || (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
+            if (!IsUsablePlayerbotEnchant(enchant) ||
+                (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
+            {
                 continue;
+            }
 
             // SpellInfo const* enchantSpell = sSpellMgr->GetSpellInfo(enchant->spellid[0]);
             // if (!enchantSpell)
@@ -2376,16 +2416,7 @@ void PlayerbotFactory::InitEquipment(bool incremental, bool second_chance)
         if (oldItem)
             continue;
 
-        if (Item* equipped = bot->EquipNewItem(dest, bestItemForSlot, true))
-        {
-            if (bestRandomPropForSlot != 0)
-            {
-                uint8 equipSlot = equipped->GetSlot();
-                bot->_ApplyItemMods(equipped, equipSlot, false);
-                equipped->SetItemRandomProperties(bestRandomPropForSlot);
-                bot->_ApplyItemMods(equipped, equipSlot, true);
-            }
-        }
+        EquipPlayerbotGeneratedItem(bot, dest, bestItemForSlot, bestRandomPropForSlot);
         bot->AutoUnequipOffhandIfNeed();
         // if (newItem)
         // {
@@ -2470,16 +2501,7 @@ void PlayerbotFactory::InitEquipment(bool incremental, bool second_chance)
             if (!CanEquipUnseenItem(slot, dest, bestItemForSlot))
                 continue;
 
-            if (Item* equipped = bot->EquipNewItem(dest, bestItemForSlot, true))
-            {
-                if (bestRandomPropForSlot != 0)
-                {
-                    uint8 equipSlot = equipped->GetSlot();
-                    bot->_ApplyItemMods(equipped, equipSlot, false);
-                    equipped->SetItemRandomProperties(bestRandomPropForSlot);
-                    bot->_ApplyItemMods(equipped, equipSlot, true);
-                }
-            }
+            EquipPlayerbotGeneratedItem(bot, dest, bestItemForSlot, bestRandomPropForSlot);
             bot->AutoUnequipOffhandIfNeed();
         }
     }
@@ -2689,7 +2711,7 @@ void PlayerbotFactory::EnchantItem(Item* item)
                 continue;
 
             SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
-            if (!enchant || enchant->slot != PERM_ENCHANTMENT_SLOT)
+            if (!IsUsablePlayerbotEnchant(enchant) || enchant->slot != PERM_ENCHANTMENT_SLOT)
                 continue;
 
             SpellInfo const* enchantSpell = sSpellMgr->GetSpellInfo(enchant->spellid[0]);
@@ -2731,7 +2753,7 @@ void PlayerbotFactory::EnchantItem(Item* item)
     uint32 id = ids[index];
 
     SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(id);
-    if (!enchant)
+    if (!IsUsablePlayerbotEnchant(enchant))
         return;
 
     bot->ApplyEnchantment(item, PERM_ENCHANTMENT_SLOT, false);
@@ -4849,6 +4871,10 @@ void PlayerbotFactory::ApplyEnchantTemplate(uint8 spec)
                 return;
             }
 
+            SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantid);
+            if (!IsUsablePlayerbotEnchant(enchant))
+                return;
+
             if (!((1 << pItem->GetTemplate()->SubClass) & spellInfo->EquippedItemSubClassMask) &&
                 !((1 << pItem->GetTemplate()->InventoryType) & spellInfo->EquippedItemInventoryTypeMask))
             {
@@ -4898,7 +4924,8 @@ void PlayerbotFactory::ApplyEnchantAndGemsNew(bool /*destroyOld*/)
             continue;
 
         SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
-        if (!enchant || (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
+        if (!IsUsablePlayerbotEnchant(enchant) ||
+            (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
         {
             continue;
         }
@@ -4958,8 +4985,11 @@ void PlayerbotFactory::ApplyEnchantAndGemsNew(bool /*destroyOld*/)
                     continue;
 
                 SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
-                if (!enchant || (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
+                if (!IsUsablePlayerbotEnchant(enchant) ||
+                    (enchant->slot != PERM_ENCHANTMENT_SLOT && enchant->slot != TEMP_ENCHANTMENT_SLOT))
+                {
                     continue;
+                }
 
                 if (enchant->requiredSkill &&
                     (!bot->HasSkill(enchant->requiredSkill) ||

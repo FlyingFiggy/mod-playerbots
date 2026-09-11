@@ -42,6 +42,12 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     if (dest == WorldPosition())
         return false;
 
+    if (!sPlayerbotAIConfig.IsMapAllowedByExpansion(dest.GetMapId()))
+    {
+        botAI->rpgInfo.Reset();
+        return false;
+    }
+
     if (dest != botAI->rpgInfo.moveFarPos)
     {
         // clear stuck information if it's a new dest
@@ -109,6 +115,25 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             bot->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
+        Map* destMap = dest.GetMapId() == bot->GetMapId() ? bot->GetMap() : dest.getMap();
+        if (!destMap)
+            return false;
+
+        float safeZ = destMap->GetHeight(bot->GetPhaseMask(), dest.GetPositionX(), dest.GetPositionY(),
+                                         dest.GetPositionZ() + 2.0f, true, 150.0f);
+        if (safeZ <= INVALID_HEIGHT)
+            safeZ = destMap->GetHeight(bot->GetPhaseMask(), dest.GetPositionX(), dest.GetPositionY(), MAX_HEIGHT);
+        if (safeZ <= INVALID_HEIGHT)
+            return false;
+
+        // A stuck target can legitimately be over water. Prefer the water
+        // surface over the terrain floor so recovery never drops the bot to
+        // the bottom of a lake or river.
+        float waterZ = destMap->GetWaterLevel(dest.GetPositionX(), dest.GetPositionY());
+        if (waterZ > INVALID_HEIGHT && waterZ > safeZ)
+            safeZ = waterZ;
+
+        dest.setZ(safeZ + 0.05f);
         bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
         return bot->TeleportTo(dest);
     }

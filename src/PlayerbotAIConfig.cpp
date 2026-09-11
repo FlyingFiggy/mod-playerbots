@@ -7,6 +7,7 @@
 #include "PlayerbotAIConfig.h"
 #include "BisListMgr.h"
 #include "Config.h"
+#include "DBCStores.h"
 #include "NewRpgInfo.h"
 #include "PlayerbotDungeonRepository.h"
 #include "PlayerbotFactory.h"
@@ -17,6 +18,7 @@
 #include "RandomPlayerbotMgr.h"
 #include "Talentspec.h"
 #include "TravelMgr.h"
+#include "World.h"
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -795,6 +797,15 @@ bool PlayerbotAIConfig::Initialize()
 // bounds/percentages are only the as-configured values here; RandomBotLevelMgr::LoadConfig()
 // copies them into its own working state, since dynamic distribution and clamp/rebalance mutate
 // percentages at runtime.
+bool PlayerbotAIConfig::IsMapAllowedByExpansion(uint32 mapId) const
+{
+    MapEntry const* mapEntry = sMapStore.LookupEntry(mapId);
+    if (!mapEntry)
+        return false;
+
+    return mapEntry->Expansion() <= sWorld->getIntConfig(CONFIG_EXPANSION);
+}
+
 void PlayerbotAIConfig::LoadRandomBotLevelConfig()
 {
     // ---- Level brackets ----

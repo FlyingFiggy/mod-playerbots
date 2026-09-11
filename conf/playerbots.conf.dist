@@ -89,6 +89,25 @@ AiPlayerbot.RandomBotAutologin = 1
 AiPlayerbot.MinRandomBots = 500
 AiPlayerbot.MaxRandomBots = 500
 
+# Randombot creation blacklist
+# Race/class entries are comma-separated race:class pairs. Names are case-insensitive; spaces, '-' and '_' are ignored.
+# These settings only affect newly created randombots. Existing characters are unchanged.
+AiPlayerbot.RandomBotBlacklist.RaceClass = "human:druid,human:hunter,nightelf:paladin,nightelf:mage"
+
+# Face IDs excluded when a new randombot appearance is generated. Empty means no excluded faces.
+AiPlayerbot.RandomBotBlacklist.Human.Male.Face = ""
+AiPlayerbot.RandomBotBlacklist.Human.Female.Face = "12,13,14,27,28,29"
+AiPlayerbot.RandomBotBlacklist.NightElf.Male.Face = "2,4"
+AiPlayerbot.RandomBotBlacklist.NightElf.Female.Face = ""
+
+# Skin IDs excluded when a new randombot appearance is generated. Empty means no excluded skins.
+AiPlayerbot.RandomBotBlacklist.Human.Male.Skin = "9,8"
+AiPlayerbot.RandomBotBlacklist.Human.Female.Skin = "9,8,7"
+
+# Hair style IDs excluded when a new randombot appearance is generated. Empty means no excluded hair styles.
+AiPlayerbot.RandomBotBlacklist.Human.Male.HairStyle = "8"
+AiPlayerbot.RandomBotBlacklist.Human.Female.HairStyle = ""
+
 # Randombot accounts
 # Set to 0 to automatically calculate needed accounts based on MaxRandomBots, EnablePeriodicOnlineOffline
 # and its ratio, and AddClassAccountPoolSize. Set manually if you want to create more accounts than needed.

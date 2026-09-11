@@ -95,6 +95,7 @@ public:
     }
 
     bool Initialize();
+    bool IsMapAllowedByExpansion(uint32 mapId) const;
     void LoadRandomBotLevelConfig();
     bool IsInRandomAccountList(uint32 id);
     bool IsInRandomQuestItemList(uint32 id);

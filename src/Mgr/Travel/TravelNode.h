@@ -605,7 +605,7 @@ private:
                                   std::unordered_map<uint32, uint32> const& parentMap);
 
     std::unordered_map<uint32, std::vector<uint32>> taxiGraph;
-    std::map<uint32, std::map<uint32, std::vector<uint32>>> taxiPathCache;
+    std::unordered_map<uint32, std::unordered_map<uint32, std::vector<uint32>>> taxiPathCache;
 
     std::vector<TravelNode*> m_nodes;
 

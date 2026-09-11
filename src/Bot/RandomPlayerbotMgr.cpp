@@ -42,6 +42,7 @@
 #include "WorldSessionMgr.h"
 #include <algorithm>
 #include <boost/thread/thread.hpp>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
@@ -168,6 +169,86 @@ double botPIDImpl::calculate(double setpoint, double pv)
 botPIDImpl::~botPIDImpl() {}
 
 uint32 RandomPlayerbotMgr::GetMaxAllowedBotCount() { return GetEventValue(0, "bot_count"); }
+
+void RandomPlayerbotMgr::ValidateRandomBotPositions(uint32 maxChecksThisTick)
+{
+    if (playerBots.empty())
+    {
+        positionValidationGuids.clear();
+        positionValidationCursor = 0;
+        return;
+    }
+
+    if (positionValidationGuids.empty() || positionValidationCursor >= positionValidationGuids.size())
+    {
+        positionValidationGuids.clear();
+        positionValidationGuids.reserve(playerBots.size());
+        for (auto const& entry : playerBots)
+            positionValidationGuids.push_back(entry.first);
+        positionValidationCursor = 0;
+    }
+
+    uint32 checked = 0;
+    while (checked < maxChecksThisTick && positionValidationCursor < positionValidationGuids.size())
+    {
+        ObjectGuid guid = positionValidationGuids[positionValidationCursor++];
+        ++checked;
+
+        auto itr = playerBots.find(guid);
+        if (itr == playerBots.end())
+            continue;
+
+        Player* bot = itr->second;
+        if (!bot || !IsRandomBot(bot) || !bot->IsInWorld() || bot->IsBeingTeleported())
+            continue;
+
+        Map* map = bot->GetMap();
+        if (!map || map->Instanceable())
+            continue;
+
+        // Let legitimate movement states finish first. This avoids treating water,
+        // falling, taxi, transport or active movement as a bad Z coordinate.
+        if (bot->IsInCombat() || bot->isMoving() || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) || bot->IsFlying() ||
+            bot->GetTransport() || bot->HasUnitMovementFlag(MOVEMENTFLAG_SWIMMING | MOVEMENTFLAG_FALLING) ||
+            bot->IsInWater())
+            continue;
+
+        if (!sPlayerbotAIConfig.IsMapAllowedByExpansion(map->GetId()))
+        {
+            LOG_DEBUG("playerbots",
+                      "Random bot {} is on map {} from a disabled expansion; scheduling a safe relocation.",
+                      bot->GetName(), map->GetId());
+            RandomTeleportForLevel(bot);
+            continue;
+        }
+
+        float x = bot->GetPositionX();
+        float y = bot->GetPositionY();
+        float z = bot->GetPositionZ();
+        float groundZ = bot->GetMapHeight(x, y, MAX_HEIGHT);
+        float floorZ = bot->GetMapHeight(x, y, z);
+
+        // Only correct an unmistakable vertical desync: both independent height
+        // queries must agree on the same floor, and the bot must be >80 yards
+        // away from it. This deliberately avoids the broad 40-yard ground test
+        // that can false-positive on water, bridges, caves and complex terrain.
+        if (groundZ <= INVALID_HEIGHT || floorZ <= INVALID_HEIGHT || std::fabs(groundZ - floorZ) > 3.0f ||
+            std::fabs(z - floorZ) <= 80.0f)
+            continue;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        LOG_INFO("playerbots",
+                 "Correcting random bot {} vertical position on map {}: Z {:.2f} -> floor {:.2f} (ground {:.2f}).",
+                 bot->GetName(), map->GetId(), z, floorZ, groundZ);
+
+        bot->GetMotionMaster()->Clear();
+        if (botAI)
+            botAI->Reset(true);
+        bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
+        bot->TeleportTo(map->GetId(), x, y, floorZ + 0.05f, bot->GetOrientation());
+        bot->SendMovementFlagUpdate();
+    }
+}
 
 void RandomPlayerbotMgr::LogPlayerLocation()
 {
@@ -306,6 +387,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     }
 
     GetBots();
+    ValidateRandomBotPositions();
+
     // Copied deliberately: ProcessBot() erases from currentBots while this is
     // being iterated below, so the loops must run over a snapshot.
     std::unordered_set<uint32> availableBots = currentBots;
@@ -1622,7 +1705,8 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
                                    std::vector<uint32>::iterator i =
                                        find(sPlayerbotAIConfig.randomBotMaps.begin(),
                                             sPlayerbotAIConfig.randomBotMaps.end(), l.GetMapId());
-                                   return i == sPlayerbotAIConfig.randomBotMaps.end();
+                                   return i == sPlayerbotAIConfig.randomBotMaps.end() ||
+                                          !sPlayerbotAIConfig.IsMapAllowedByExpansion(l.GetMapId());
                                }),
                 tlocs.end());
     if (tlocs.empty())
@@ -1666,11 +1750,23 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
         if (map->IsInWater(bot->GetPhaseMask(), x, y, z, bot->GetCollisionHeight()))
             continue;
 
-        float ground = map->GetHeight(bot->GetPhaseMask(), x, y, z + 0.5f);
+        // Prefer the local floor around the cached Z (caves/bridges), but use a
+        // wider search than the core default so high creature spawns cannot
+        // become sky teleports. If that still fails, resolve the top terrain
+        // exactly like the .gps GroundZ query does.
+        float ground = map->GetHeight(bot->GetPhaseMask(), x, y, z + 2.0f, true, 150.0f);
+        if (ground <= INVALID_HEIGHT)
+            ground = map->GetHeight(bot->GetPhaseMask(), x, y, MAX_HEIGHT);
         if (ground <= INVALID_HEIGHT)
             continue;
 
         z = 0.05f + ground;
+
+        // The original cached Z can be far above a lake and therefore fail the
+        // first water test. Re-check at the resolved floor so we do not turn a
+        // bad high-Z spawn into an underwater teleport.
+        if (map->IsInWater(bot->GetPhaseMask(), x, y, z, bot->GetCollisionHeight()))
+            continue;
 
         if (!botAI->StarterLevelDistanceCheck(bot, loc, true))
             continue;
